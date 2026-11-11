@@ -8,6 +8,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/zap v1.28.0
 	go.uber.org/zap/exp v0.3.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/tools v0.52.0
 	honnef.co/go/tools v0.8.2
 )
