@@ -1,0 +1,102 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      # A failed target must not cancel the engine build of the others: their cache would be lost.
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    # A cold engine build takes up to an hour; a hung clone or scons must not hold the runner for 6 hours.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      # cgo needs a mingw compiler for arm64, which the image lacks.
+      - name: llvm-mingw
+        if: matrix.runner == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          $name = 'llvm-mingw-20261104-ucrt-aarch64'
+          $zip = "$env:RUNNER_TEMP\$name.zip"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$name.zip" -OutFile $zip
+          if ((Get-FileHash $zip).Hash -ne '7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab') { throw 'llvm-mingw checksum mismatch' }
+          Expand-Archive $zip $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\$name\bin" >> $env:GITHUB_PATH
+          'CC=aarch64-w64-mingw32-clang' >> $env:GITHUB_ENV
+      # cmd/libgodot keeps the built engine in os.UserCacheDir()/go-godot-kit/godot-<version>; only the file
+      # is cached, the sources and objects next to it are not needed to copy it into lib/.
+      - name: LibGodot cache path
+        id: libgodot
+        run: |
+          version=$(sed -n 's/^const Version = "\(.*\)"$/\1/p' internal/libgodot/libgodot.go)
+          case "$RUNNER_OS" in
+            macOS) dir=$HOME/Library/Caches ;;
+            Linux) dir=${XDG_CACHE_HOME:-$HOME/.cache} ;;
+            Windows) dir=$LOCALAPPDATA ;;
+          esac
+          echo "key=libgodot-$RUNNER_OS-$RUNNER_ARCH-$version" >> "$GITHUB_OUTPUT"
+          echo "path=$dir/go-godot-kit/godot-$version/libgodot.*" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          key: ${{ steps.libgodot.outputs.key }}
+          path: ${{ steps.libgodot.outputs.path }}
+      # Pinned versions keep the cached engine reproducible: scons from PyPI in a venv on every OS,
+      # MoltenVK from its release, checked by SHA-256 and put where cmd/libgodot looks for the Vulkan SDK.
+      - name: build tools for LibGodot
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          case "$RUNNER_OS" in
+            Windows) python -m venv "$RUNNER_TEMP/scons"; bin="$RUNNER_TEMP/scons/Scripts" ;;
+            *) python3 -m venv "$RUNNER_TEMP/scons"; bin="$RUNNER_TEMP/scons/bin" ;;
+          esac
+          "$bin/python" -m pip install scons==4.11.1
+          echo "$bin" >> "$GITHUB_PATH"
+          if [ "$RUNNER_OS" = macOS ]; then
+            curl -fsSL -o "$RUNNER_TEMP/mvk.tar" https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar
+            echo "f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e  $RUNNER_TEMP/mvk.tar" | shasum -a 256 -c
+            tar -xf "$RUNNER_TEMP/mvk.tar" -C "$RUNNER_TEMP"
+            mkdir -p "$HOME/VulkanSDK/moltenvk-1.4.2/macOS/lib"
+            mv "$RUNNER_TEMP/MoltenVK/MoltenVK/static/MoltenVK.xcframework" "$HOME/VulkanSDK/moltenvk-1.4.2/macOS/lib/"
+          fi
+      # The first build takes 20-60 minutes, later runs copy the cached file.
+      - run: go run ./cmd/libgodot
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          key: ${{ steps.libgodot.outputs.key }}
+          path: ${{ steps.libgodot.outputs.path }}
+      - run: go vet ./...
+      # The race detector on Windows supports only amd64; TestSmoke runs in its own step.
+      - run: go test ${{ matrix.runner != 'windows-11-arm' && '-race' || '' }} -skip '^TestSmoke$' -coverprofile=coverage.out ./...
+      - run: go test -run '^TestSmoke$' -v ./pkg/kit
+      # Every runner lints its own GOOS files; the release files (tag archive or musl) are linted once.
+      - run: go run ./cmd/staticlint ./...
+      - if: matrix.runner == 'macos-15'
+        run: go run ./cmd/staticlint ./...
+        env:
+          GOFLAGS: -tags=archive
+      - if: matrix.runner == 'macos-15'
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9
+        with:
+          version: v2.15.0
+      # Every runner checks its own GOOS files.
+      - name: coverage at least 70%
+        run: go tool cover -func=coverage.out | awk '/^total:/ { sub("%", "", $3); print "coverage " $3 "%"; if ($3 < 70) exit 1 }'
+      - name: generated code is up to date
+        if: matrix.runner == 'macos-15'
+        run: go generate ./... && test -z "$(git status --porcelain)"
