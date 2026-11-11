@@ -1,0 +1,28 @@
+version: "2"
+linters:
+  enable:
+    - errcheck
+    - errorlint
+    - govet
+    - staticcheck
+    - gocyclo
+    - unused
+    - revive
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+    govet:
+      enable:
+        - shadow
+    gocyclo:
+      min-complexity: 15
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/shigabutdinoff
