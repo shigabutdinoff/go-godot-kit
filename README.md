@@ -7,7 +7,7 @@ Go Godot Kit, or kit, is the launcher for Go games that embed Godot through LibG
 > [!IMPORTANT]
 > The engine runs on macOS, Linux and Windows, arm64 and amd64, built with cgo: the targets of the libgodot mode of graphics.gd's `gd`. On other platforms a game prints its build version and exits with code 1.
 
-Go Godot Kit is supported for games on [graphics.gd](https://github.com/quaadgras/graphics.gd) `v0.0.0-20261109055115-ea818be6cab0` and Godot 4.7.2, with support for macOS, Linux and Windows on arm64 and amd64.
+Go Godot Kit is supported for games on [graphics.gd](https://github.com/quaadgras/graphics.gd) `v0.0.0-20261117040540-3b822ee9ca88` and Godot 4.7.2, with support for macOS, Linux and Windows on arm64 and amd64.
 
 ## Documentation
 
