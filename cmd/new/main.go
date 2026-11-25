@@ -37,11 +37,13 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
 	templateURL    = "https://github.com/shigabutdinoff/go-godot-tpl.git"
 	templateModule = "github.com/shigabutdinoff/go-godot-tpl"
+	gitWaitDelay   = 10 * time.Second
 	nameRule       = "use lowercase letters a-z, digits 0-9 and single hyphens, start with a letter and do not " +
 		"end with a hyphen; go and toolchain are reserved"
 )
@@ -125,7 +127,8 @@ func create(ctx context.Context, args []string, e env) error {
 	case len(names) > 1:
 		return usageError{fmt.Errorf("unexpected argument %q", names[1])}
 	case len(names) == 1:
-		name, err = names[0], checkName(e.dir, names[0])
+		name = names[0]
+		err = checkName(e.dir, name)
 	case e.interactive && !*noInteraction:
 		name, err = ask(e)
 	default:
@@ -202,7 +205,7 @@ func fromTemplate(ctx context.Context, e env, name string) error {
 	if err = os.RemoveAll(filepath.Join(tmp, ".git")); err != nil {
 		return fmt.Errorf("remove template history: %w", err)
 	}
-	if err = rename(tmp, name); err != nil {
+	if err = replaceNames(tmp, name); err != nil {
 		return err
 	}
 	if err = os.Rename(filepath.Join(tmp, "cmd", "game"), filepath.Join(tmp, "cmd", name)); err != nil {
@@ -214,10 +217,26 @@ func fromTemplate(ctx context.Context, e env, name string) error {
 	return nil
 }
 
+// gitCmd returns git with args in dir and the environment of e. Cancelling ctx interrupts git, as Ctrl+C
+// would; after gitWaitDelay, or at once where an interrupt cannot be sent (Windows), it is killed.
+func gitCmd(ctx context.Context, e env, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir, cmd.Env = dir, e.environ
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	// A killed git may leave helpers such as git-remote-https holding the output pipes.
+	cmd.WaitDelay = gitWaitDelay
+	return cmd
+}
+
 // git runs git in dir with its output on the terminal.
 func git(ctx context.Context, e env, dir string, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = dir, e.environ, e.out, e.errOut
+	cmd := gitCmd(ctx, e, dir, args...)
+	cmd.Stdout, cmd.Stderr = e.out, e.errOut
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git: %w", err)
 	}
@@ -227,10 +246,8 @@ func git(ctx context.Context, e env, dir string, args ...string) error {
 // initRepo creates a git repository in game on the default branch, commits all files and adds the template
 // as the remote template.
 func initRepo(ctx context.Context, e env, game string) error {
-	cmd := exec.CommandContext(ctx, "git", "config", "--get", "init.defaultBranch")
-	cmd.Dir, cmd.Env = game, e.environ
 	// Exit code 1 means the option is not set.
-	out, _ := cmd.Output()
+	out, _ := gitCmd(ctx, e, game, "config", "--get", "init.defaultBranch").Output()
 	branch := strings.TrimSpace(string(out))
 	if branch == "" {
 		branch = "main"
@@ -254,9 +271,9 @@ func initRepo(ctx context.Context, e env, game string) error {
 // replacement replaces old with new in file, a slash path in the template or "*.go" for every Go file.
 type replacement struct{ file, old, new string }
 
-// rename applies the replacements for name in the template in dir. Each must match at least once, or the
+// replaceNames applies the replacements for name in the template in dir. Each must match at least once, or the
 // template does not match this version of the command.
-func rename(dir, name string) error {
+func replaceNames(dir, name string) error {
 	prefix := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 	for _, r := range []replacement{
 		{"go.mod", "module " + templateModule, "module " + name},
