@@ -19,6 +19,33 @@ go doc github.com/shigabutdinoff/go-godot-kit/pkg/kit Run
 
 A complete minimal game lives in [`testdata/game`](testdata/game).
 
+## New game
+
+`cmd/new` creates a game from the template [go-godot-tpl](https://github.com/shigabutdinoff/go-godot-tpl), the way `laravel new` creates a Laravel application. It needs Go and git and runs with `go run`, not `go get -tool`, because there is no game and no `go.mod` yet:
+
+```shell
+go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<version> mygame
+```
+
+The command clones master of the template without history and renames `cmd/game`, the module, `Name`, `EnvPrefix` and the Godot project name. README, `LICENSE` and the shared config files stay as in the template. The version of the command picks only the command: the kit version comes from the template's `go.mod`. If the template does not match the command, it names the file and creates nothing.
+
+The name is the game folder, the Go module path and, in upper case with `_` for `-`, the prefix of environment variables: `my-game` gives module `my-game`, `cmd/my-game` and `MY_GAME_…`. It holds `a-z`, `0-9` and single hyphens, starts with a letter and does not end with a hyphen; `go` and `toolchain` are reserved. Without a name the command asks for it in a terminal until the name is valid and its folder is free; with `-n` or without a terminal it fails.
+
+`-git` creates a repository with one commit of all the files, on the branch from `init.defaultBranch` or `main`, and adds the template as remote `template`. Then kit and the shared files update with:
+
+```shell
+go get github.com/shigabutdinoff/go-godot-kit@<version> && go mod tidy
+git fetch template && git checkout template/master -- .github .golangci.yml .gitattributes .gitignore staticcheck.conf
+```
+
+Exit code 0 means the game is created or `-h` was given; 1 is an error, including an existing game folder and a missing name with `-n` or without a terminal; 2 is an invalid name or arguments. At the end the command prints the next steps:
+
+```shell
+cd mygame
+go tool libgodot  # see LibGodot below
+go run ./cmd/mygame
+```
+
 ## Tools
 
 The module ships three tools for games. Add them with the built-in `go get -tool` command and run them with `go tool`:
@@ -233,6 +260,7 @@ flowchart LR
 ```text
 cmd/
   libgodot/     builds LibGodot for development
+  new/          creates a game from the template
   reset/        generates Reset() methods
   staticlint/   multichecker: go vet passes, staticcheck, osexit
 internal/

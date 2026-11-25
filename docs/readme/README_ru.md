@@ -19,6 +19,33 @@ go doc github.com/shigabutdinoff/go-godot-kit/pkg/kit Run
 
 Полная минимальная игра лежит в [`testdata/game`](../../testdata/game).
 
+## Новая игра
+
+`cmd/new` создаёт игру из шаблона [go-godot-tpl](https://github.com/shigabutdinoff/go-godot-tpl), как `laravel new` создаёт приложение Laravel. Ей нужны Go и git, а запускается она через `go run`, а не `go get -tool`, потому что игры и её `go.mod` ещё нет:
+
+```shell
+go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<версия> mygame
+```
+
+Команда клонирует master шаблона без истории и переименовывает `cmd/game`, модуль, `Name`, `EnvPrefix` и имя проекта Godot. README, `LICENSE` и общие файлы настроек остаются как в шаблоне. Версия команды выбирает только саму команду: версия kit берётся из `go.mod` шаблона. Если шаблон не совпадает с командой, она называет файл и ничего не создаёт.
+
+Имя — это папка игры, путь модуля Go и, в верхнем регистре с `_` вместо `-`, префикс переменных окружения: из `my-game` получаются модуль `my-game`, `cmd/my-game` и `MY_GAME_…`. Оно состоит из `a-z`, `0-9` и одиночных дефисов, начинается с буквы и не заканчивается дефисом; `go` и `toolchain` заняты. Без имени команда спрашивает его в терминале, пока имя не станет допустимым, а его папка — свободной; с `-n` или без терминала она завершается с ошибкой.
+
+`-git` создаёт репозиторий с одним коммитом всех файлов на ветке из `init.defaultBranch`, иначе `main`, и подключает шаблон как remote `template`. Дальше kit и общие файлы обновляются так:
+
+```shell
+go get github.com/shigabutdinoff/go-godot-kit@<версия> && go mod tidy
+git fetch template && git checkout template/master -- .github .golangci.yml .gitattributes .gitignore staticcheck.conf
+```
+
+Код выхода 0 — игра создана или передан `-h`; 1 — ошибка, в том числе папка игры уже есть или имени нет при `-n` или без терминала; 2 — недопустимое имя или аргументы. В конце команда печатает следующие шаги:
+
+```shell
+cd mygame
+go tool libgodot  # см. LibGodot ниже
+go run ./cmd/mygame
+```
+
 ## Инструменты
 
 Модуль поставляет играм три инструмента. Добавьте их встроенной командой `go get -tool` и запускайте через `go tool`:
@@ -233,6 +260,7 @@ flowchart LR
 ```text
 cmd/
   libgodot/     собирает LibGodot для разработки
+  new/          создаёт игру из шаблона
   reset/        генерирует методы Reset()
   staticlint/   multichecker: анализаторы go vet, staticcheck, osexit
 internal/
