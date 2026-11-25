@@ -11,7 +11,7 @@ require (
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/tools v0.52.0
-	graphics.gd v0.0.0-20261117040540-3b822ee9ca88
+	graphics.gd v0.0.0-20261124051453-80534e52f447
 	honnef.co/go/tools v0.8.2
 )
 

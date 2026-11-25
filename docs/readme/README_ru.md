@@ -7,7 +7,7 @@ Go Godot Kit, или kit, — запускатель для игр на Go со 
 > [!IMPORTANT]
 > Движок работает на macOS, Linux и Windows, arm64 и amd64, в сборке с cgo — на целях режима libgodot у `gd` из graphics.gd. На других платформах игра печатает версию сборки и выходит с кодом 1.
 
-Go Godot Kit поддерживает игры на [graphics.gd](https://github.com/quaadgras/graphics.gd) `v0.0.0-20261117040540-3b822ee9ca88` и Godot 4.7.2, платформы — macOS, Linux и Windows на arm64 и amd64.
+Go Godot Kit поддерживает игры на [graphics.gd](https://github.com/quaadgras/graphics.gd) `v0.0.0-20261124051453-80534e52f447` и Godot 4.7.2, платформы — macOS, Linux и Windows на arm64 и amd64.
 
 ## Документация
 
