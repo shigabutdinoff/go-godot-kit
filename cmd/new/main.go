@@ -1,7 +1,7 @@
 // New creates a Go game on go-godot-kit from the template github.com/shigabutdinoff/go-godot-tpl. It runs
 // without installation:
 //
-//	go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<version> [-n] [name]
+//	go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<version> [-n] [-git] [name]
 //
 // The name is the game folder, the Go module path and, in upper case with "_" for "-", the prefix of the
 // game's environment variables (my-game: module my-game, MY_GAME_…). It holds a-z, 0-9 and single hyphens,
@@ -11,6 +11,12 @@
 // The command clones master of the template with git, without history, next to the game folder, renames
 // cmd/game, the module, Name, EnvPrefix and the Godot project name, and moves the result into the game folder.
 // README, LICENSE and the shared config files stay as in the template. It needs Go and git.
+//
+// Without -git the game has no git repository. With -git the command creates one on the branch from
+// git config init.defaultBranch, or main, commits all files of the game once and adds the template as the
+// remote template, so shared files can be updated from it:
+//
+//	git fetch template && git checkout template/master -- .github .golangci.yml .gitattributes .gitignore staticcheck.conf
 //
 // Errors go to stderr as one line. Exit code 0 means the game is created or -h was given, 1 is an error,
 // 2 is an invalid name or arguments.
@@ -50,12 +56,14 @@ type message string
 
 func (m message) Error() string { return string(m) }
 
-// env is what run works with: the folder the game is created in, the template repository and the terminal.
+// env is what run works with: the folder the game is created in, the template repository, the terminal and
+// the environment of git, nil for the environment of the command.
 type env struct {
 	dir, template string
 	in            io.Reader
 	out, errOut   io.Writer
 	interactive   bool
+	environ       []string
 }
 
 // usageError is an invalid name or invalid arguments, exit code 2.
@@ -96,6 +104,7 @@ func create(ctx context.Context, args []string, e env) error {
 	flags := flag.NewFlagSet("new", flag.ContinueOnError)
 	flags.SetOutput(e.errOut)
 	noInteraction := flags.Bool("n", false, "do not ask for the name")
+	withGit := flags.Bool("git", false, "create a git repository with one commit and the template as remote template")
 	var names []string
 	// Flags may follow the name.
 	for {
@@ -127,6 +136,11 @@ func create(ctx context.Context, args []string, e env) error {
 	}
 	if err = fromTemplate(ctx, e, name); err != nil {
 		return err
+	}
+	if *withGit {
+		if err = initRepo(ctx, e, filepath.Join(e.dir, name)); err != nil {
+			return err
+		}
 	}
 	_, err = fmt.Fprintf(e.out, "\n  Game ready in [%[1]s]. You can start your local development using:\n\n"+
 		" ➜ cd %[1]s\n ➜ go tool libgodot\n ➜ go run ./cmd/%[1]s\n\n", name)
@@ -203,9 +217,36 @@ func fromTemplate(ctx context.Context, e env, name string) error {
 // git runs git in dir with its output on the terminal.
 func git(ctx context.Context, e env, dir string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir, cmd.Stdout, cmd.Stderr = dir, e.out, e.errOut
+	cmd.Dir, cmd.Env, cmd.Stdout, cmd.Stderr = dir, e.environ, e.out, e.errOut
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git: %w", err)
+	}
+	return nil
+}
+
+// initRepo creates a git repository in game on the default branch, commits all files and adds the template
+// as the remote template.
+func initRepo(ctx context.Context, e env, game string) error {
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "init.defaultBranch")
+	cmd.Dir, cmd.Env = game, e.environ
+	// Exit code 1 means the option is not set.
+	out, _ := cmd.Output()
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		branch = "main"
+	}
+	for _, step := range []struct {
+		name string
+		args []string
+	}{
+		{"create the git repository", []string{"init", "--quiet", "-b", branch}},
+		{"add the files to git", []string{"add", "-A"}},
+		{"make the first commit", []string{"commit", "--quiet", "-m", "Set up a fresh game"}},
+		{"add the remote template", []string{"remote", "add", "template", e.template}},
+	} {
+		if err := git(ctx, e, game, step.args...); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
 	}
 	return nil
 }

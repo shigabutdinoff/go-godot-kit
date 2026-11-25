@@ -250,3 +250,100 @@ func TestRun_TemplateErrors(t *testing.T) {
 		})
 	}
 }
+
+// gitEnv returns the environment of the command with an isolated git config: global config from config,
+// no system config and no author from the parent environment.
+func gitEnv(t *testing.T, config string, extra ...string) []string {
+	t.Helper()
+	home := t.TempDir()
+	global := filepath.Join(home, "gitconfig")
+	require.NoError(t, os.WriteFile(global, []byte(config), 0o644))
+	environ := make([]string, 0, len(os.Environ())+len(extra)+4)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(kv), "GIT_") && !strings.HasPrefix(strings.ToUpper(kv), "EMAIL=") {
+			environ = append(environ, kv)
+		}
+	}
+	environ = append(environ, "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_GLOBAL="+global,
+		"GIT_CONFIG_NOSYSTEM=1")
+	return append(environ, extra...)
+}
+
+// author is the commit author for gitEnv.
+var author = []string{"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+	"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com"}
+
+// runGit runs the command in dir with the template and the environment given.
+func runGit(t *testing.T, dir, template string, environ []string, args ...string) result {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := run(t.Context(), args, env{
+		dir: dir, template: template, in: strings.NewReader(""), out: &out, errOut: &errOut, environ: environ,
+	})
+	return result{code: code, out: out.String(), errOut: errOut.String()}
+}
+
+// gitOut runs git in dir with environ and returns its trimmed output.
+func gitOut(t *testing.T, dir string, environ []string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = environ
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
+}
+
+func TestRun_Git(t *testing.T) {
+	t.Parallel()
+	tpl := templateRepo(t, nil)
+	for _, tt := range []struct {
+		name, config, wantBranch string
+	}{
+		{name: "default branch unset", wantBranch: "main"},
+		{name: "default branch set", config: "[init]\n\tdefaultBranch = trunk\n", wantBranch: "trunk"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			environ := gitEnv(t, tt.config, author...)
+
+			r := runGit(t, dir, tpl, environ, "mygame", "-git")
+
+			require.Equal(t, 0, r.code, r.errOut)
+			game := filepath.Join(dir, "mygame")
+			assert.Equal(t, tt.wantBranch, gitOut(t, game, environ, "branch", "--show-current"))
+			assert.Equal(t, "1", gitOut(t, game, environ, "rev-list", "--count", "HEAD"))
+			assert.Equal(t, "Set up a fresh game", gitOut(t, game, environ, "log", "-1", "--format=%s"))
+			assert.Empty(t, gitOut(t, game, environ, "status", "--porcelain"))
+			assert.Equal(t, tpl, gitOut(t, game, environ, "remote", "get-url", "template"))
+
+			gitOut(t, game, environ, "fetch", "--quiet", "template")
+			gitOut(t, game, environ, "checkout", "template/master", "--", ".golangci.yml", "README.md", "LICENSE")
+			assert.Empty(t, gitOut(t, game, environ, "status", "--porcelain"))
+		})
+	}
+}
+
+func TestRun_NoGit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	r := runGit(t, dir, templateRepo(t, nil), gitEnv(t, "", author...), "mygame")
+
+	require.Equal(t, 0, r.code, r.errOut)
+	assert.NoDirExists(t, filepath.Join(dir, "mygame", ".git"))
+}
+
+func TestRun_GitNoAuthor(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// useConfigOnly stops git from guessing the author from the user and host names.
+	environ := gitEnv(t, "[user]\n\tuseConfigOnly = true\n")
+
+	r := runGit(t, dir, templateRepo(t, nil), environ, "-git", "mygame")
+
+	assert.Equal(t, 1, r.code)
+	assert.Contains(t, r.errOut, "  ERROR  make the first commit")
+	assert.Equal(t, []string{"mygame"}, entries(t, dir))
+	assert.FileExists(t, filepath.Join(dir, "mygame", "go.mod"))
+}
