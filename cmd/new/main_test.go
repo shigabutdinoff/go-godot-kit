@@ -559,6 +559,7 @@ func TestRun_LibGodot(t *testing.T) {
 
 			require.Equal(t, tt.wantCode, r.code, r.errOut)
 			assert.Equal(t, tt.interactive && !slices.Contains(tt.args, "-n"), strings.Contains(r.out, question))
+			assert.Equal(t, tt.interactive && !slices.Contains(tt.args, "-n"), strings.Contains(r.out, logo))
 			if !tt.wantBuild {
 				assert.Empty(t, log)
 				assert.Contains(t, r.out, "➜ go tool libgodot\n")
