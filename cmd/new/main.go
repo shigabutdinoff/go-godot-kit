@@ -24,7 +24,7 @@
 // -organization if given, and pushes the game there; -github="--public" passes other flags of gh repo create.
 // Without gh or its login the command warns and skips this step.
 //
-// In a terminal the command asks whether to build LibGodot for the game; -libgodot builds it without asking.
+// In a terminal the command prints its name in large letters and asks whether to build LibGodot for the game; -libgodot builds it without asking.
 //
 // Errors go to stderr as one line. Exit code 0 means the game is created or -h was given, 1 is an error,
 // 2 is an invalid name or arguments.
@@ -55,6 +55,16 @@ const (
 	nameRule       = "use lowercase letters a-z, digits 0-9 and single hyphens, start with a letter and do not " +
 		"end with a hyphen; go and toolchain are reserved"
 )
+
+// logo is printed in a terminal before the questions.
+const logo = "\n\x1b[36m" +
+	"                                     _       _\n" +
+	"    __ _  ___         __ _  ___   __| | ___ | |_\n" +
+	"   / _` |/ _ \\ _____ / _` |/ _ \\ / _` |/ _ \\| __|\n" +
+	"  | (_| | (_) |_____| (_| | (_) | (_| | (_) | |_\n" +
+	"   \\__, |\\___/       \\__, |\\___/ \\__,_|\\___/ \\__|\n" +
+	"   |___/             |___/\n" +
+	"\x1b[0m\n"
 
 // errMissingName is the error for a missing name.
 const errMissingName message = `Not enough arguments (missing: "name").`
@@ -146,6 +156,9 @@ func create(ctx context.Context, args []string, e env) error {
 	o, names, err := parse(args, e.errOut)
 	if err != nil {
 		return err
+	}
+	if e.interactive && !o.noInteraction {
+		_, _ = fmt.Fprint(e.out, logo)
 	}
 	lines := bufio.NewScanner(e.in)
 	name, game, err := target(e, o, names, lines)
