@@ -1,4 +1,4 @@
-// Game is an empty game: a copy of go-godot-tpl that cmd/new tests use.
+// Game is an empty game: a copy of go-godot-tpl that cmd/gogodot tests use.
 //
 // Usage:
 //
