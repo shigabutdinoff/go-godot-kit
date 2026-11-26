@@ -1,22 +1,30 @@
 // New creates a Go game on go-godot-kit from the template github.com/shigabutdinoff/go-godot-tpl. It runs
 // without installation:
 //
-//	go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<version> [-n] [-git] [name]
+//	go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<version> [flags] [name]
 //
 // The name is the game folder, the Go module path and, in upper case with "_" for "-", the prefix of the
 // game's environment variables (my-game: module my-game, MY_GAME_…). It holds a-z, 0-9 and single hyphens,
 // starts with a letter and does not end with a hyphen; go and toolchain are reserved. Without a name the
-// command asks for it in a terminal; with -n or without a terminal it fails instead.
+// command asks for it in a terminal; with -n or without a terminal it fails instead. The name . creates the
+// game in the current folder, which must be empty, and takes the name of the folder.
 //
-// The command clones master of the template with git, without history, next to the game folder, renames
-// cmd/game, the module, Name, EnvPrefix and the Godot project name, and moves the result into the game folder.
-// README, LICENSE and the shared config files stay as in the template. It needs Go and git.
+// The command clones master of the template with git, or develop with -dev, without history, next to the game
+// folder, renames cmd/game, the module, Name, EnvPrefix and the Godot project name, and moves the result into
+// the game folder. README, LICENSE and the shared config files stay as in the template. It needs Go and git.
+// An existing game folder is an error; with -force (-f) it is removed once the new game is ready.
 //
-// Without -git the game has no git repository. With -git the command creates one on the branch from
-// git config init.defaultBranch, or main, commits all files of the game once and adds the template as the
+// Without -git the game has no git repository. With -git the command creates one on the branch from -branch,
+// git config init.defaultBranch or main, commits all files of the game once and adds the template as the
 // remote template, so shared files can be updated from it:
 //
 //	git fetch template && git checkout template/master -- .github .golangci.yml .gitattributes .gitignore staticcheck.conf
+//
+// -github also creates the repository, then a private repository on GitHub with the GitHub CLI, in
+// -organization if given, and pushes the game there; -github="--public" passes other flags of gh repo create.
+// Without gh or its login the command warns and skips this step.
+//
+// In a terminal the command asks whether to build LibGodot for the game; -libgodot builds it without asking.
 //
 // Errors go to stderr as one line. Exit code 0 means the game is created or -h was given, 1 is an error,
 // 2 is an invalid name or arguments.
@@ -66,7 +74,37 @@ type env struct {
 	out, errOut   io.Writer
 	interactive   bool
 	environ       []string
+	// gh is the GitHub CLI and libgodot the command that builds LibGodot in the game folder.
+	gh       string
+	libgodot []string
 }
+
+// options are the flags of the command.
+type options struct {
+	noInteraction, force, git, dev, libgodot bool
+	branch, organization                     string
+	github                                   githubFlag
+}
+
+// githubFlag is -github: given at all, and the flags of gh repo create instead of --private.
+type githubFlag struct {
+	set   bool
+	flags string
+}
+
+func (g *githubFlag) String() string { return g.flags }
+
+// Set takes "true" for -github without a value.
+func (g *githubFlag) Set(v string) error {
+	g.set = true
+	if v != "true" {
+		g.flags = v
+	}
+	return nil
+}
+
+// IsBoolFlag lets -github go without a value.
+func (g *githubFlag) IsBoolFlag() bool { return true }
 
 // usageError is an invalid name or invalid arguments, exit code 2.
 type usageError struct{ error }
@@ -80,6 +118,7 @@ func main() {
 	code := run(ctx, os.Args[1:], env{
 		dir: ".", template: templateURL, in: os.Stdin, out: os.Stdout, errOut: os.Stderr,
 		interactive: err == nil && stat.Mode()&os.ModeCharDevice != 0,
+		gh:          "gh", libgodot: []string{"go", "tool", "libgodot"},
 	})
 	stop()
 	exit(code)
@@ -101,53 +140,119 @@ func run(ctx context.Context, args []string, e env) int {
 	return 1
 }
 
-// create gets the name, makes the game from the template and prints the next steps.
+// create gets the name, makes the game from the template, sets up git, GitHub and LibGodot and prints the next
+// steps.
 func create(ctx context.Context, args []string, e env) error {
+	o, names, err := parse(args, e.errOut)
+	if err != nil {
+		return err
+	}
+	lines := bufio.NewScanner(e.in)
+	name, game, err := target(e, o, names, lines)
+	if err != nil {
+		return err
+	}
+	if err = fromTemplate(ctx, e, o, name, game); err != nil {
+		return err
+	}
+	if o.git || o.github.set {
+		if err = initRepo(ctx, e, game, o.branch); err != nil {
+			return err
+		}
+	}
+	if o.github.set {
+		if err = pushToGitHub(ctx, e, o, name, game); err != nil {
+			return err
+		}
+	}
+	built, err := buildEngine(ctx, e, o, lines, game)
+	if err != nil {
+		return err
+	}
+	steps := ""
+	if game != e.dir {
+		steps += " ➜ cd " + name + "\n"
+	}
+	if !built {
+		steps += " ➜ go tool libgodot\n"
+	}
+	_, err = fmt.Fprintf(e.out, "\n  Game ready in [%s]. You can start your local development using:\n\n%s ➜ go run ./cmd/%[1]s\n\n",
+		name, steps)
+	return err
+}
+
+// parse returns the flags and the arguments; flags may follow the name.
+func parse(args []string, errOut io.Writer) (options, []string, error) {
+	var o options
 	flags := flag.NewFlagSet("new", flag.ContinueOnError)
-	flags.SetOutput(e.errOut)
-	noInteraction := flags.Bool("n", false, "do not ask for the name")
-	withGit := flags.Bool("git", false, "create a git repository with one commit and the template as remote template")
+	flags.SetOutput(errOut)
+	flags.BoolVar(&o.noInteraction, "n", false, "do not ask questions")
+	flags.BoolVar(&o.force, "force", false, "replace the game folder if it exists")
+	flags.BoolVar(&o.force, "f", false, "shorthand for -force")
+	flags.BoolVar(&o.dev, "dev", false, "create the game from develop of the template")
+	flags.BoolVar(&o.git, "git", false, "create a git repository with one commit and the template as remote template")
+	flags.StringVar(&o.branch, "branch", "", "the branch of the git repository (default init.defaultBranch or main)")
+	flags.Var(&o.github, "github", "create a private GitHub repository with gh and push the game; "+
+		"-github=<flags> passes other flags of gh repo create")
+	flags.StringVar(&o.organization, "organization", "", "the GitHub organization of the repository")
+	flags.BoolVar(&o.libgodot, "libgodot", false, "build LibGodot without asking")
 	var names []string
-	// Flags may follow the name.
 	for {
 		if err := flags.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
-				return err
+				return o, nil, err
 			}
-			return usageError{err}
+			return o, nil, usageError{err}
 		}
 		if flags.NArg() == 0 {
-			break
+			return o, names, nil
 		}
 		names, args = append(names, flags.Arg(0)), flags.Args()[1:]
 	}
+}
+
+// target returns the name and the folder of the game: the name given, the current folder for ".", or the name
+// asked for in a terminal.
+func target(e env, o options, names []string, lines *bufio.Scanner) (string, string, error) {
 	var name string
 	var err error
 	switch {
 	case len(names) > 1:
-		return usageError{fmt.Errorf("unexpected argument %q", names[1])}
+		return "", "", usageError{fmt.Errorf("unexpected argument %q", names[1])}
+	case len(names) == 1 && names[0] == ".":
+		return here(e, o)
 	case len(names) == 1:
 		name = names[0]
-		err = checkName(e.dir, name)
-	case e.interactive && !*noInteraction:
-		name, err = ask(e)
+		err = checkName(e.dir, name, o.force)
+	case e.interactive && !o.noInteraction:
+		name, err = ask(e, lines, o.force)
 	default:
 		err = errMissingName
 	}
+	return name, filepath.Join(e.dir, name), err
+}
+
+// here returns the name and the folder for a game in the current folder, which must be empty.
+func here(e env, o options) (string, string, error) {
+	if o.force {
+		return "", "", errors.New("cannot use -force with the current folder")
+	}
+	abs, err := filepath.Abs(e.dir)
 	if err != nil {
-		return err
+		return "", "", err
 	}
-	if err = fromTemplate(ctx, e, name); err != nil {
-		return err
+	name := filepath.Base(abs)
+	if !validName(name) {
+		return "", "", usageError{fmt.Errorf("invalid name %q of the current folder: %s", name, nameRule)}
 	}
-	if *withGit {
-		if err = initRepo(ctx, e, filepath.Join(e.dir, name)); err != nil {
-			return err
-		}
+	list, err := os.ReadDir(e.dir)
+	if err != nil {
+		return "", "", err
 	}
-	_, err = fmt.Fprintf(e.out, "\n  Game ready in [%[1]s]. You can start your local development using:\n\n"+
-		" ➜ cd %[1]s\n ➜ go tool libgodot\n ➜ go run ./cmd/%[1]s\n\n", name)
-	return err
+	if len(list) > 0 {
+		return "", "", errors.New("the current folder is not empty")
+	}
+	return name, e.dir, nil
 }
 
 // validName reports whether name can be a game folder, a Go module path and an env prefix.
@@ -155,10 +260,14 @@ func validName(name string) bool {
 	return nameRE.MatchString(name) && name != "go" && name != "toolchain"
 }
 
-// checkName returns a usageError for an invalid name and an error if the game folder already exists.
-func checkName(dir, name string) error {
+// checkName returns a usageError for an invalid name and, without force, an error if the game folder already
+// exists.
+func checkName(dir, name string, force bool) error {
 	if !validName(name) {
 		return usageError{fmt.Errorf("invalid name %q: %s", name, nameRule)}
+	}
+	if force {
+		return nil
 	}
 	switch _, err := os.Lstat(filepath.Join(dir, name)); {
 	case err == nil:
@@ -170,8 +279,7 @@ func checkName(dir, name string) error {
 }
 
 // ask asks for the name until it is valid and free; the end of input means no name.
-func ask(e env) (string, error) {
-	lines := bufio.NewScanner(e.in)
+func ask(e env, lines *bufio.Scanner, force bool) (string, error) {
 	for {
 		_, _ = fmt.Fprint(e.out, "What is the name of your game?\nE.g. my-game\n> ")
 		if !lines.Scan() {
@@ -179,7 +287,7 @@ func ask(e env) (string, error) {
 			return "", errors.Join(lines.Err(), errMissingName)
 		}
 		name := strings.TrimSpace(lines.Text())
-		err := checkName(e.dir, name)
+		err := checkName(e.dir, name, force)
 		if err == nil {
 			return name, nil
 		}
@@ -188,8 +296,9 @@ func ask(e env) (string, error) {
 }
 
 // fromTemplate clones the template into a temporary folder next to the game folder, renames the game in it
-// and moves it into place. On error the temporary folder is removed and the game folder does not appear.
-func fromTemplate(ctx context.Context, e env, name string) error {
+// and moves it into place: into game, replacing it with -force, or into the current folder. On error the
+// temporary folder is removed and the game folder is left as it was.
+func fromTemplate(ctx context.Context, e env, o options, name, game string) error {
 	tmp, err := os.MkdirTemp(e.dir, "."+name+"-")
 	if err != nil {
 		return fmt.Errorf("create temporary folder: %w", err)
@@ -199,7 +308,11 @@ func fromTemplate(ctx context.Context, e env, name string) error {
 	if err = os.Chmod(tmp, 0o755); err != nil {
 		return err
 	}
-	if err = git(ctx, e, e.dir, "clone", "--quiet", "--depth", "1", "--branch", "master", e.template, tmp); err != nil {
+	branch := "master"
+	if o.dev {
+		branch = "develop"
+	}
+	if err = git(ctx, e, e.dir, "clone", "--quiet", "--depth", "1", "--branch", branch, e.template, tmp); err != nil {
 		return fmt.Errorf("clone template: %w", err)
 	}
 	if err = os.RemoveAll(filepath.Join(tmp, ".git")); err != nil {
@@ -211,16 +324,38 @@ func fromTemplate(ctx context.Context, e env, name string) error {
 	if err = os.Rename(filepath.Join(tmp, "cmd", "game"), filepath.Join(tmp, "cmd", name)); err != nil {
 		return fmt.Errorf("rename cmd/game: %w", err)
 	}
-	if err = os.Rename(tmp, filepath.Join(e.dir, name)); err != nil {
+	if game == e.dir {
+		return moveEntries(tmp, game)
+	}
+	if o.force {
+		if err = os.RemoveAll(game); err != nil {
+			return fmt.Errorf("remove the existing game: %w", err)
+		}
+	}
+	if err = os.Rename(tmp, game); err != nil {
 		return fmt.Errorf("move the game into place: %w", err)
 	}
 	return nil
 }
 
-// gitCmd returns git with args in dir and the environment of e. Cancelling ctx interrupts git, as Ctrl+C
-// would; after gitWaitDelay, or at once where an interrupt cannot be sent (Windows), it is killed.
-func gitCmd(ctx context.Context, e env, dir string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+// moveEntries moves everything in from into dir.
+func moveEntries(from, dir string) error {
+	list, err := os.ReadDir(from)
+	if err != nil {
+		return err
+	}
+	for _, d := range list {
+		if err = os.Rename(filepath.Join(from, d.Name()), filepath.Join(dir, d.Name())); err != nil {
+			return fmt.Errorf("move the game into place: %w", err)
+		}
+	}
+	return nil
+}
+
+// command returns the program with args in dir and the environment of e. Cancelling ctx interrupts it, as
+// Ctrl+C would; after gitWaitDelay, or at once where an interrupt cannot be sent (Windows), it is killed.
+func command(ctx context.Context, e env, dir, program string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, program, args...)
 	cmd.Dir, cmd.Env = dir, e.environ
 	cmd.Cancel = func() error {
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
@@ -233,22 +368,28 @@ func gitCmd(ctx context.Context, e env, dir string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// git runs git in dir with its output on the terminal.
-func git(ctx context.Context, e env, dir string, args ...string) error {
-	cmd := gitCmd(ctx, e, dir, args...)
+// runShown runs cmd with its output on the terminal.
+func runShown(e env, cmd *exec.Cmd) error {
 	cmd.Stdout, cmd.Stderr = e.out, e.errOut
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git: %w", err)
+		return fmt.Errorf("%s: %w", filepath.Base(cmd.Args[0]), err)
 	}
 	return nil
 }
 
-// initRepo creates a git repository in game on the default branch, commits all files and adds the template
-// as the remote template.
-func initRepo(ctx context.Context, e env, game string) error {
-	// Exit code 1 means the option is not set.
-	out, _ := gitCmd(ctx, e, game, "config", "--get", "init.defaultBranch").Output()
-	branch := strings.TrimSpace(string(out))
+// git runs git in dir with its output on the terminal.
+func git(ctx context.Context, e env, dir string, args ...string) error {
+	return runShown(e, command(ctx, e, dir, "git", args...))
+}
+
+// initRepo creates a git repository in game on branch, or on the default branch, commits all files and adds
+// the template as the remote template.
+func initRepo(ctx context.Context, e env, game, branch string) error {
+	if branch == "" {
+		// Exit code 1 means the option is not set.
+		out, _ := command(ctx, e, game, "git", "config", "--get", "init.defaultBranch").Output()
+		branch = strings.TrimSpace(string(out))
+	}
 	if branch == "" {
 		branch = "main"
 	}
@@ -266,6 +407,62 @@ func initRepo(ctx context.Context, e env, game string) error {
 		}
 	}
 	return nil
+}
+
+// pushToGitHub creates the GitHub repository of the game with gh and pushes the game there. Without gh or its
+// login it warns and skips this step.
+func pushToGitHub(ctx context.Context, e env, o options, name, game string) error {
+	if command(ctx, e, game, e.gh, "auth", "status").Run() != nil {
+		_, _ = fmt.Fprintln(e.out, `  WARN  Make sure the "gh" CLI tool is installed and that you're authenticated `+
+			"to GitHub. Skipping...")
+		return nil
+	}
+	repo := name
+	if o.organization != "" {
+		repo = o.organization + "/" + name
+	}
+	flags := strings.Fields(o.github.flags)
+	if len(flags) == 0 {
+		flags = []string{"--private"}
+	}
+	cmd := command(ctx, e, game, e.gh, append([]string{"repo", "create", repo, "--source=.", "--push"}, flags...)...)
+	cmd.Env = e.environ
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	// gh must not wait for a password that nobody types.
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+	if err := runShown(e, cmd); err != nil {
+		return fmt.Errorf("create the GitHub repository: %w", err)
+	}
+	return nil
+}
+
+// buildEngine builds LibGodot in game with -libgodot or if the answer in a terminal is yes, and reports
+// whether it did.
+func buildEngine(ctx context.Context, e env, o options, lines *bufio.Scanner, game string) (bool, error) {
+	if !o.libgodot && (!e.interactive || o.noInteraction || !confirm(e, lines,
+		"Would you like to build LibGodot now? The first build takes 5 to 60 minutes")) {
+		return false, nil
+	}
+	if err := runShown(e, command(ctx, e, game, e.libgodot[0], e.libgodot[1:]...)); err != nil {
+		return false, fmt.Errorf("build LibGodot: %w", err)
+	}
+	return true, nil
+}
+
+// confirm asks question and reports whether the answer is yes, the default; the end of input means no.
+func confirm(e env, lines *bufio.Scanner, question string) bool {
+	_, _ = fmt.Fprintf(e.out, "%s? (yes/no) [yes]\n> ", question)
+	if !lines.Scan() {
+		_, _ = fmt.Fprintln(e.out)
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(lines.Text())) {
+	case "", "y", "yes":
+		return true
+	}
+	return false
 }
 
 // replacement replaces old with new in file, a slash path in the template or "*.go" for every Go file.
