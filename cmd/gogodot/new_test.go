@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -47,7 +48,7 @@ type result struct {
 func runIn(t *testing.T, dir, template, input string, interactive bool, args ...string) result {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code := run(t.Context(), args, env{
+	code := run(t.Context(), append([]string{"new"}, args...), env{
 		dir: dir, template: template, in: strings.NewReader(input), out: &out, errOut: &errOut,
 		interactive: interactive,
 	})
@@ -281,7 +282,7 @@ var author = []string{"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com
 func runGit(t *testing.T, dir, template string, environ []string, args ...string) result {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code := run(t.Context(), args, env{
+	code := run(t.Context(), append([]string{"new"}, args...), env{
 		dir: dir, template: template, in: strings.NewReader(""), out: &out, errOut: &errOut, environ: environ,
 	})
 	return result{code: code, out: out.String(), errOut: errOut.String()}
@@ -319,11 +320,7 @@ func TestRun_Git(t *testing.T) {
 			assert.Equal(t, "1", gitOut(t, game, environ, "rev-list", "--count", "HEAD"))
 			assert.Equal(t, "Set up a fresh game", gitOut(t, game, environ, "log", "-1", "--format=%s"))
 			assert.Empty(t, gitOut(t, game, environ, "status", "--porcelain"))
-			assert.Equal(t, tpl, gitOut(t, game, environ, "remote", "get-url", "template"))
-
-			gitOut(t, game, environ, "fetch", "--quiet", "template")
-			gitOut(t, game, environ, "checkout", "template/master", "--", ".golangci.yml", "README.md", "LICENSE")
-			assert.Empty(t, gitOut(t, game, environ, "status", "--porcelain"))
+			assert.Empty(t, gitOut(t, game, environ, "remote"))
 		})
 	}
 }
@@ -352,8 +349,9 @@ func TestRun_GitNoAuthor(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dir, "mygame", "go.mod"))
 }
 
-// TestMain makes the test binary a fake gh or LibGodot build when FAKE_TOOL_LOG is set: it appends its folder
-// and arguments to that file and fails when its first argument is FAKE_TOOL_FAIL.
+// TestMain makes the test binary a fake gh, LibGodot build or go when FAKE_TOOL_LOG is set: it appends its
+// folder and arguments to that file and fails when its first argument is FAKE_TOOL_FAIL. As go get it sets the
+// kit version in go.mod, FAKE_LATEST for latest.
 func TestMain(m *testing.M) {
 	if log := os.Getenv("FAKE_TOOL_LOG"); log != "" {
 		wd, _ := os.Getwd()
@@ -366,9 +364,28 @@ func TestMain(m *testing.M) {
 		if len(os.Args) > 1 && os.Args[1] == os.Getenv("FAKE_TOOL_FAIL") {
 			os.Exit(1)
 		}
+		if len(os.Args) > 2 && os.Args[1] == "get" {
+			fakeGet(os.Args[2])
+		}
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+// fakeGet is go get for TestMain: it sets the kit version of arg, module@version, in go.mod.
+func fakeGet(arg string) {
+	_, v, _ := strings.Cut(arg, "@")
+	if v == "latest" {
+		v = os.Getenv("FAKE_LATEST")
+	}
+	b, err := os.ReadFile("go.mod")
+	if err == nil {
+		b = regexp.MustCompile(regexp.QuoteMeta(kitModule)+` v\S+`).ReplaceAll(b, []byte(kitModule+" "+v))
+		err = os.WriteFile("go.mod", b, 0o644)
+	}
+	if err != nil {
+		os.Exit(1)
+	}
 }
 
 // fake runs the command in dir with a fake gh and LibGodot build that log to the returned file.
@@ -376,7 +393,7 @@ func fake(t *testing.T, dir, template, input string, interactive bool, fail stri
 	t.Helper()
 	log := filepath.Join(t.TempDir(), "log")
 	var out, errOut bytes.Buffer
-	code := run(t.Context(), args, env{
+	code := run(t.Context(), append([]string{"new"}, args...), env{
 		dir: dir, template: template, in: strings.NewReader(input), out: &out, errOut: &errOut,
 		interactive: interactive,
 		environ:     gitEnv(t, "", append([]string{"FAKE_TOOL_LOG=" + log, "FAKE_TOOL_FAIL=" + fail}, author...)...),

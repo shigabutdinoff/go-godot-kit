@@ -21,22 +21,18 @@ A complete minimal game lives in [`testdata/game`](testdata/game).
 
 ## New game
 
-`cmd/new` creates a game from the template [go-godot-tpl](https://github.com/shigabutdinoff/go-godot-tpl). It needs Go and git and runs with `go run`, not `go get -tool`, because there is no game and no `go.mod` yet:
+`gogodot` creates and updates games made from the template [go-godot-tpl](https://github.com/shigabutdinoff/go-godot-tpl). It needs Go and git. Install it once with `go install`, not `go get -tool`, because `gogodot new` runs where there is no game and no `go.mod` yet:
 
 ```shell
-go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<version> mygame
+go install github.com/shigabutdinoff/go-godot-kit/cmd/gogodot@latest
+gogodot new mygame
 ```
 
-The command clones master of the template, or develop with `-dev`, without history and renames `cmd/game`, the module, `Name`, `EnvPrefix` and the Godot project name. README, `LICENSE` and the shared config files stay as in the template. The version of the command picks only the command: the kit version comes from the template's `go.mod`. If the template does not match the command, it names the file and creates nothing.
+`gogodot new` clones master of the template, or develop with `-dev`, without history and renames `cmd/game`, the module, `Name`, `EnvPrefix` and the Godot project name. README, `LICENSE` and the shared config files stay as in the template. The kit version of the game comes from the template's `go.mod`. If the template does not match the command, it names the file and creates nothing.
 
 The name is the game folder, the Go module path and, in upper case with `_` for `-`, the prefix of environment variables: `my-game` gives module `my-game`, `cmd/my-game` and `MY_GAME_…`. It holds `a-z`, `0-9` and single hyphens, starts with a letter and does not end with a hyphen; `go` and `toolchain` are reserved. Without a name the command asks for it in a terminal until the name is valid and its folder is free; with `-n` or without a terminal it fails. The name `.` creates the game in the current folder, which must be empty, and takes the folder's name. An existing game folder is an error; `-force` (`-f`) replaces it once the new game is ready, but not with `.`.
 
-`-git` creates a repository with one commit of all the files, on the branch from `-branch`, `init.defaultBranch` or `main`, and adds the template as remote `template`. Then kit and the shared files update with:
-
-```shell
-go get github.com/shigabutdinoff/go-godot-kit@<version> && go mod tidy
-git fetch template && git checkout template/master -- .github .golangci.yml .gitattributes .gitignore staticcheck.conf
-```
+`-git` creates a repository with one commit of all the files, on the branch from `-branch`, `init.defaultBranch` or `main`.
 
 `-github` also creates the repository, then a private GitHub repository with the [GitHub CLI](https://cli.github.com), in `-organization` if given, and pushes the game there; `-github="--public"` passes other flags of `gh repo create` instead of `--private`. Without `gh` or its login the command warns and skips this step.
 
@@ -49,6 +45,16 @@ cd mygame
 go tool libgodot  # see LibGodot below
 go run ./cmd/mygame
 ```
+
+### Update
+
+In the game folder `gogodot update` updates kit to its latest release, or `gogodot update v0.3.0` to that version, and tidies `go.mod`. It also takes the shared files `.github`, `.golangci.yml`, `.gitattributes`, `.gitignore` and `staticcheck.conf` from master of the template, whatever the kit version; no remote or branch of the template is left in the game's git. A shared file the template no longer has is removed if it is the same as in some version of the template; files the game added or changed stay.
+
+```shell
+gogodot update
+```
+
+The command prints the kit versions, such as `kit v0.2.0 -> v0.3.0`, and the shared files changed, or that there is nothing to update. It commits nothing: review the changes and commit them. The game must have no uncommitted changes. Exit code 0 means updated, nothing to update or `-h`; 1 is an error, including uncommitted changes and a folder without a game on kit; 2 is a version not in the form `vX.Y.Z` or invalid arguments.
 
 ## Tools
 
@@ -86,7 +92,7 @@ GOOS=windows go vet ./... && GOOS=windows go build -o /dev/null ./...
 go get github.com/shigabutdinoff/go-godot-kit@latest && go mod tidy
 ```
 
-The same command updates kit. Do not add `-u`: the graphics.gd version comes from kit's `go.mod`.
+In a game made with `gogodot new`, update kit with [`gogodot update`](#update). Do not add `-u`: the graphics.gd version comes from kit's `go.mod`.
 
 The game's `cmd/<name>/main.go` calls `Run`:
 
@@ -264,7 +270,7 @@ flowchart LR
 ```text
 cmd/
   libgodot/     builds LibGodot for development
-  new/          creates a game from the template
+  gogodot/      creates and updates games: new, update
   reset/        generates Reset() methods
   staticlint/   multichecker: go vet passes, staticcheck, osexit
 internal/

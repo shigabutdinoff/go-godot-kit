@@ -21,22 +21,18 @@ go doc github.com/shigabutdinoff/go-godot-kit/pkg/kit Run
 
 ## Новая игра
 
-`cmd/new` создаёт игру из шаблона [go-godot-tpl](https://github.com/shigabutdinoff/go-godot-tpl). Ей нужны Go и git, а запускается она через `go run`, а не `go get -tool`, потому что игры и её `go.mod` ещё нет:
+`gogodot` создаёт и обновляет игры из шаблона [go-godot-tpl](https://github.com/shigabutdinoff/go-godot-tpl). Ей нужны Go и git. Установите её один раз через `go install`, а не `go get -tool`, потому что `gogodot new` запускают там, где игры и её `go.mod` ещё нет:
 
 ```shell
-go run github.com/shigabutdinoff/go-godot-kit/cmd/new@<версия> mygame
+go install github.com/shigabutdinoff/go-godot-kit/cmd/gogodot@latest
+gogodot new mygame
 ```
 
-Команда клонирует master шаблона, а с `-dev` — develop, без истории и переименовывает `cmd/game`, модуль, `Name`, `EnvPrefix` и имя проекта Godot. README, `LICENSE` и общие файлы настроек остаются как в шаблоне. Версия команды выбирает только саму команду: версия kit берётся из `go.mod` шаблона. Если шаблон не совпадает с командой, она называет файл и ничего не создаёт.
+`gogodot new` клонирует master шаблона, а с `-dev` — develop, без истории и переименовывает `cmd/game`, модуль, `Name`, `EnvPrefix` и имя проекта Godot. README, `LICENSE` и общие файлы настроек остаются как в шаблоне. Версия kit в игре берётся из `go.mod` шаблона. Если шаблон не совпадает с командой, она называет файл и ничего не создаёт.
 
 Имя — это папка игры, путь модуля Go и, в верхнем регистре с `_` вместо `-`, префикс переменных окружения: из `my-game` получаются модуль `my-game`, `cmd/my-game` и `MY_GAME_…`. Оно состоит из `a-z`, `0-9` и одиночных дефисов, начинается с буквы и не заканчивается дефисом; `go` и `toolchain` заняты. Без имени команда спрашивает его в терминале, пока имя не станет допустимым, а его папка — свободной; с `-n` или без терминала она завершается с ошибкой. Имя `.` создаёт игру в текущей папке, которая должна быть пустой, и берёт имя папки. Существующая папка игры — ошибка; `-force` (`-f`) заменяет её, когда новая игра готова, но не вместе с `.`.
 
-`-git` создаёт репозиторий с одним коммитом всех файлов на ветке из `-branch`, `init.defaultBranch`, иначе `main`, и подключает шаблон как remote `template`. Дальше kit и общие файлы обновляются так:
-
-```shell
-go get github.com/shigabutdinoff/go-godot-kit@<версия> && go mod tidy
-git fetch template && git checkout template/master -- .github .golangci.yml .gitattributes .gitignore staticcheck.conf
-```
+`-git` создаёт репозиторий с одним коммитом всех файлов на ветке из `-branch`, `init.defaultBranch`, иначе `main`.
 
 `-github` тоже создаёт репозиторий, затем приватный репозиторий на GitHub через [GitHub CLI](https://cli.github.com), в `-organization`, если она указана, и отправляет туда игру; `-github="--public"` передаёт `gh repo create` другие флаги вместо `--private`. Без `gh` или входа в него команда предупреждает и пропускает этот шаг.
 
@@ -49,6 +45,16 @@ cd mygame
 go tool libgodot  # см. LibGodot ниже
 go run ./cmd/mygame
 ```
+
+### Обновление
+
+В папке игры `gogodot update` обновляет kit до последней выпущенной версии, а `gogodot update v0.3.0` — до указанной, и приводит в порядок `go.mod`. Ещё она берёт общие файлы `.github`, `.golangci.yml`, `.gitattributes`, `.gitignore` и `staticcheck.conf` из master шаблона, какой бы ни была версия kit; ни remote, ни веток шаблона в git игры не остаётся. Общий файл, которого больше нет в шаблоне, удаляется, если он такой же, как в какой-то версии шаблона; файлы, которые игра добавила или изменила, остаются.
+
+```shell
+gogodot update
+```
+
+Команда печатает версии kit, например `kit v0.2.0 -> v0.3.0`, и изменённые общие файлы, а если менять нечего — что обновлять нечего. Коммит она не делает: проверьте изменения и закоммитьте их сами. В игре не должно быть незакоммиченных изменений. Код выхода 0 — обновлено, обновлять нечего или передан `-h`; 1 — ошибка, в том числе незакоммиченные изменения и папка без игры на kit; 2 — версия не в виде `vX.Y.Z` или неверные аргументы.
 
 ## Инструменты
 
@@ -86,7 +92,7 @@ GOOS=windows go vet ./... && GOOS=windows go build -o /dev/null ./...
 go get github.com/shigabutdinoff/go-godot-kit@latest && go mod tidy
 ```
 
-Та же команда обновляет kit. Не добавляйте `-u`: версия graphics.gd берётся из `go.mod` kit.
+В игре, созданной `gogodot new`, kit обновляет [`gogodot update`](#обновление). Не добавляйте `-u`: версия graphics.gd берётся из `go.mod` kit.
 
 `cmd/<имя>/main.go` игры вызывает `Run`:
 
@@ -264,7 +270,7 @@ flowchart LR
 ```text
 cmd/
   libgodot/     собирает LibGodot для разработки
-  new/          создаёт игру из шаблона
+  gogodot/      создаёт и обновляет игры: new, update
   reset/        генерирует методы Reset()
   staticlint/   multichecker: анализаторы go vet, staticcheck, osexit
 internal/
