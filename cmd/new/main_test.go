@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -346,4 +350,226 @@ func TestRun_GitNoAuthor(t *testing.T) {
 	assert.Contains(t, r.errOut, "  ERROR  make the first commit")
 	assert.Equal(t, []string{"mygame"}, entries(t, dir))
 	assert.FileExists(t, filepath.Join(dir, "mygame", "go.mod"))
+}
+
+// TestMain makes the test binary a fake gh or LibGodot build when FAKE_TOOL_LOG is set: it appends its folder
+// and arguments to that file and fails when its first argument is FAKE_TOOL_FAIL.
+func TestMain(m *testing.M) {
+	if log := os.Getenv("FAKE_TOOL_LOG"); log != "" {
+		wd, _ := os.Getwd()
+		f, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, _ = fmt.Fprintf(f, "%s|%s|%s\n", filepath.Base(wd), strings.Join(os.Args[1:], " "),
+				os.Getenv("GIT_TERMINAL_PROMPT"))
+			_ = f.Close()
+		}
+		if len(os.Args) > 1 && os.Args[1] == os.Getenv("FAKE_TOOL_FAIL") {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// fake runs the command in dir with a fake gh and LibGodot build that log to the returned file.
+func fake(t *testing.T, dir, template, input string, interactive bool, fail string, args ...string) (result, string) {
+	t.Helper()
+	log := filepath.Join(t.TempDir(), "log")
+	var out, errOut bytes.Buffer
+	code := run(t.Context(), args, env{
+		dir: dir, template: template, in: strings.NewReader(input), out: &out, errOut: &errOut,
+		interactive: interactive,
+		environ:     gitEnv(t, "", append([]string{"FAKE_TOOL_LOG=" + log, "FAKE_TOOL_FAIL=" + fail}, author...)...),
+		gh:          os.Args[0], libgodot: []string{os.Args[0], "libgodot"},
+	})
+	b, err := os.ReadFile(log)
+	if !errors.Is(err, fs.ErrNotExist) {
+		require.NoError(t, err)
+	}
+	return result{code: code, out: out.String(), errOut: errOut.String()}, string(b)
+}
+
+func TestRun_Force(t *testing.T) {
+	t.Parallel()
+	tpl := templateRepo(t, nil)
+	for _, tt := range []struct {
+		name, template string
+		args           []string
+		wantCode       int
+	}{
+		{name: "-force", template: tpl, args: []string{"mygame", "--force"}},
+		{name: "-f", template: tpl, args: []string{"-f", "mygame"}},
+		{name: "clone fails", template: filepath.Join(t.TempDir(), "missing"), args: []string{"-f", "mygame"},
+			wantCode: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "mygame", "keep.txt")
+			require.NoError(t, os.Mkdir(filepath.Dir(marker), 0o755))
+			require.NoError(t, os.WriteFile(marker, []byte("keep"), 0o644))
+
+			r := runIn(t, dir, tt.template, "", false, tt.args...)
+
+			require.Equal(t, tt.wantCode, r.code, r.errOut)
+			assert.Equal(t, []string{"mygame"}, entries(t, dir))
+			if tt.wantCode == 0 {
+				assert.NoFileExists(t, marker)
+				assert.FileExists(t, filepath.Join(dir, "mygame", "go.mod"))
+			} else {
+				assert.Equal(t, []string{"keep.txt"}, entries(t, filepath.Join(dir, "mygame")))
+			}
+		})
+	}
+}
+
+func TestRun_Here(t *testing.T) {
+	t.Parallel()
+	tpl := templateRepo(t, nil)
+	t.Run("empty folder", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "space-race")
+		require.NoError(t, os.Mkdir(dir, 0o755))
+
+		r := runIn(t, dir, tpl, "", false, ".")
+
+		require.Equal(t, 0, r.code, r.errOut)
+		assert.Contains(t, read(t, dir, "cmd", "space-race", "main.go"), `EnvPrefix: "SPACE_RACE"`)
+		assert.Regexp(t, `^module space-race\s`, read(t, dir, "go.mod"))
+		assert.NotContains(t, strings.Join(entries(t, dir), " "), ".space-race-")
+		assert.Contains(t, r.out, "Game ready in [space-race]")
+		assert.NotContains(t, r.out, "➜ cd")
+	})
+	for _, tt := range []struct {
+		name, folder, file, wantErr string
+		args                        []string
+		wantCode                    int
+	}{
+		{name: "not empty", folder: "space-race", file: "keep.txt", wantErr: "not empty", wantCode: 1},
+		{name: "invalid folder name", folder: "Space_Race", wantErr: "a-z", wantCode: 2},
+		{name: "-force", folder: "space-race", args: []string{"--force"}, wantErr: "-force", wantCode: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), tt.folder)
+			require.NoError(t, os.Mkdir(dir, 0o755))
+			if tt.file != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, tt.file), nil, 0o644))
+			}
+
+			r := runIn(t, dir, tpl, "", false, append([]string{"."}, tt.args...)...)
+
+			assert.Equal(t, tt.wantCode, r.code)
+			assert.Contains(t, r.errOut, tt.wantErr)
+			if tt.file == "" {
+				assert.Empty(t, entries(t, dir))
+			} else {
+				assert.Equal(t, []string{tt.file}, entries(t, dir))
+			}
+		})
+	}
+}
+
+func TestRun_Dev(t *testing.T) {
+	t.Parallel()
+	tpl := templateRepo(t, nil)
+	gitOut(t, tpl, nil, "switch", "-q", "-c", "develop")
+	require.NoError(t, os.WriteFile(filepath.Join(tpl, "NEW.md"), []byte("new"), 0o644))
+	gitOut(t, tpl, nil, "add", "NEW.md")
+	gitOut(t, tpl, nil, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "new")
+	gitOut(t, tpl, nil, "switch", "-q", "master")
+	dir := t.TempDir()
+
+	require.Equal(t, 0, runIn(t, dir, tpl, "", false, "stable").code)
+	r := runIn(t, dir, tpl, "", false, "-dev", "fresh")
+
+	require.Equal(t, 0, r.code, r.errOut)
+	assert.NoFileExists(t, filepath.Join(dir, "stable", "NEW.md"))
+	assert.FileExists(t, filepath.Join(dir, "fresh", "NEW.md"))
+}
+
+func TestRun_Branch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	environ := gitEnv(t, "[init]\n\tdefaultBranch = main\n", author...)
+
+	r := runGit(t, dir, templateRepo(t, nil), environ, "mygame", "-git", "-branch", "trunk")
+
+	require.Equal(t, 0, r.code, r.errOut)
+	assert.Equal(t, "trunk", gitOut(t, filepath.Join(dir, "mygame"), environ, "branch", "--show-current"))
+}
+
+func TestRun_GitHub(t *testing.T) {
+	t.Parallel()
+	tpl := templateRepo(t, nil)
+	for _, tt := range []struct {
+		name, fail, wantLog, wantOut string
+		args                         []string
+		wantCode                     int
+	}{
+		{name: "private", args: []string{"mygame", "-github"},
+			wantLog: "mygame|auth status|\nmygame|repo create mygame --source=. --push --private|0\n"},
+		{name: "organization and flags", args: []string{"mygame", "--github=--public", "--organization=acme"},
+			wantLog: "mygame|auth status|\nmygame|repo create acme/mygame --source=. --push --public|0\n"},
+		{name: "no login", fail: "auth", args: []string{"mygame", "-github"},
+			wantLog: "mygame|auth status|\n", wantOut: "  WARN  Make sure the \"gh\" CLI tool is installed"},
+		{name: "create fails", fail: "repo", args: []string{"mygame", "-github"}, wantCode: 1,
+			wantLog: "mygame|auth status|\nmygame|repo create mygame --source=. --push --private|0\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+
+			r, log := fake(t, dir, tpl, "", false, tt.fail, tt.args...)
+
+			require.Equal(t, tt.wantCode, r.code, r.errOut)
+			assert.Equal(t, tt.wantLog, log)
+			assert.Contains(t, r.out, tt.wantOut)
+			assert.DirExists(t, filepath.Join(dir, "mygame", ".git"))
+			if tt.wantCode != 0 {
+				assert.Contains(t, r.errOut, "  ERROR  create the GitHub repository")
+			}
+		})
+	}
+}
+
+func TestRun_LibGodot(t *testing.T) {
+	t.Parallel()
+	tpl := templateRepo(t, nil)
+	const question = "Would you like to build LibGodot now?"
+	for _, tt := range []struct {
+		name, input, fail string
+		args              []string
+		interactive       bool
+		wantBuild         bool
+		wantCode          int
+	}{
+		{name: "flag", args: []string{"mygame", "-libgodot"}, wantBuild: true},
+		{name: "yes by default", args: []string{"mygame"}, input: "\n", interactive: true, wantBuild: true},
+		{name: "no", args: []string{"mygame"}, input: "no\n", interactive: true},
+		{name: "end of input", args: []string{"mygame"}, interactive: true},
+		{name: "-n", args: []string{"mygame", "-n"}, input: "yes\n", interactive: true},
+		{name: "not a terminal", args: []string{"mygame"}, input: "yes\n"},
+		{name: "build fails", args: []string{"mygame", "-libgodot"}, fail: "libgodot", wantBuild: true, wantCode: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, log := fake(t, t.TempDir(), tpl, tt.input, tt.interactive, tt.fail, tt.args...)
+
+			require.Equal(t, tt.wantCode, r.code, r.errOut)
+			assert.Equal(t, tt.interactive && !slices.Contains(tt.args, "-n"), strings.Contains(r.out, question))
+			if !tt.wantBuild {
+				assert.Empty(t, log)
+				assert.Contains(t, r.out, "➜ go tool libgodot\n")
+				return
+			}
+			assert.Equal(t, "mygame|libgodot|\n", log)
+			if tt.wantCode == 0 {
+				assert.NotContains(t, r.out, "go tool libgodot")
+			} else {
+				assert.Contains(t, r.errOut, "  ERROR  build LibGodot")
+			}
+		})
+	}
 }
