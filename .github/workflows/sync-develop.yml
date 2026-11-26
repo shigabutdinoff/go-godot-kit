@@ -1,0 +1,24 @@
+name: sync develop
+
+# Rebase and merge gives master new commits with the same files as develop. develop is moved onto them, so the
+# next pull request carries only new work. A develop with unmerged commits differs from master and is left as is.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - run: |
+          git rev-parse -q --verify origin/develop >/dev/null || { echo "no develop branch"; exit 0; }
+          if [ "$(git rev-parse origin/develop^{tree})" != "$(git rev-parse HEAD^{tree})" ]; then
+            echo "develop has unmerged changes; left as is"; exit 0
+          fi
+          git push --force-with-lease=develop:origin/develop origin HEAD:develop
